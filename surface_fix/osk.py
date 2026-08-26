@@ -16,6 +16,7 @@ import time
 from typing import List, Optional
 
 BY_ID = "/dev/input/by-id"
+LOG_PATH = "/tmp/surface-osk.log"
 
 # Preferred OSK binaries (Surface/tablet-friendly on Wayland first).
 OSK_CANDIDATES: List[str] = [
@@ -35,6 +36,30 @@ def find_osk() -> Optional[str]:
         if shutil.which(candidate):
             return candidate
     return None
+
+
+def detect_scale() -> float:
+    """Best-effort detection of the primary output scale (HiDPI).
+
+    Compositors sometimes report scale 1.0 to layer-shell clients even on
+    HiDPI outputs, which makes the OSK render blurry/undersized. We read the
+    real scale from ``hyprctl monitors`` so wvkbd can be told the correct
+    value via WVKBD_SCALE.
+    """
+    try:
+        out = subprocess.run(["hyprctl", "monitors"],
+                             capture_output=True, text=True, timeout=5).stdout
+    except Exception:
+        return 1.0
+    best = 1.0
+    for line in out.splitlines():
+        line = line.strip().lower()
+        if line.startswith("scale:"):
+            try:
+                best = float(line.split(":", 1)[1].strip())
+            except ValueError:
+                pass
+    return best
 
 
 def type_cover_attached(marker: str = "Surface_Type_Cover") -> bool:
@@ -83,11 +108,14 @@ class OskDaemon:
 
     def _log(self, msg: str) -> None:
         line = f"{time.strftime('%H:%M:%S')} {msg}"
-        if self.log_path:
-            with open(self.log_path, "a", encoding="utf-8") as fh:
+        target = self.log_path or LOG_PATH
+        try:
+            with open(target, "a", encoding="utf-8") as fh:
                 fh.write(line + "\n")
-        else:
-            print(line)
+                fh.flush()
+        except OSError:
+            pass
+        print(line, flush=True)
 
     def _running(self) -> bool:
         if self._proc is not None and self._proc.poll() is None:
@@ -104,10 +132,20 @@ class OskDaemon:
         if self._running():
             return
         _recover_wayland_env()
-        self._log(f"tablet mode: starting {self.osk_cmd}")
-        self._proc = subprocess.Popen([self.osk_cmd, *self.args],
-                                      stdout=subprocess.DEVNULL,
-                                      stderr=subprocess.DEVNULL)
+        env = dict(os.environ)
+        scale = env.get("WVKBD_SCALE") or env.get("SURFACE_OSK_SCALE") \
+            or str(detect_scale())
+        env["WVKBD_SCALE"] = scale
+        self._log(f"tablet mode: starting {self.osk_cmd} (WAYLAND_DISPLAY="
+                  f"{env.get('WAYLAND_DISPLAY')} scale={scale})")
+        self._proc = subprocess.Popen(
+            [self.osk_cmd, *self.args],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=env,
+            start_new_session=True,
+        )
 
     def _stop(self) -> None:
         if not self._running():
@@ -124,9 +162,13 @@ class OskDaemon:
             subprocess.run(["pkill", "-f", self.osk_cmd], check=False)
 
     def run(self) -> None:
-        self._log(f"started; OSK_CMD={self.osk_cmd} poll={self.poll}s")
+        _recover_wayland_env()
+        self._log(f"started; OSK_CMD={self.osk_cmd} poll={self.poll}s "
+                  f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')}")
         while True:
-            if type_cover_attached(self.marker):
+            attached = type_cover_attached(self.marker)
+            self._log(f"poll: attached={attached}")
+            if attached:
                 self._stop()
             else:
                 self._start()

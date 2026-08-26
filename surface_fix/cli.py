@@ -40,6 +40,7 @@ After=graphical-session.target
 [Service]
 Type=simple
 WorkingDirectory={root}
+Environment=PATH={localbin}:/usr/local/bin:/usr/bin:/bin
 ExecStart={python} -m surface_fix.cli osk run
 Restart=always
 RestartSec=2
@@ -69,8 +70,10 @@ def _write_osk_service(bin_path: str) -> None:
     os.makedirs(unit_dir, exist_ok=True)
     unit_path = os.path.join(unit_dir, "surface-osk.service")
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    localbin = os.path.expanduser("~/.local/bin")
     with open(unit_path, "w", encoding="utf-8") as fh:
-        fh.write(SYSTEMD_OSK_UNIT.format(root=root, python=sys.executable))
+        fh.write(SYSTEMD_OSK_UNIT.format(root=root, python=sys.executable,
+                                         localbin=localbin))
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
     subprocess.run(["systemctl", "--user", "enable", "--now",
                     "surface-osk.service"], check=False)
