@@ -16,6 +16,7 @@ import time
 from typing import List, Optional
 
 BY_ID = "/dev/input/by-id"
+USB_BASE = "/sys/bus/usb/devices"
 LOG_PATH = "/tmp/surface-osk.log"
 
 # Preferred OSK binaries (Surface/tablet-friendly on Wayland first).
@@ -62,19 +63,43 @@ def detect_scale() -> float:
     return best
 
 
-def type_cover_attached(marker: str = "Surface_Type_Cover") -> bool:
+def _sysfs_read(*parts: str) -> str:
+    try:
+        with open(os.path.join(*parts), "r", encoding="utf-8") as fh:
+            return fh.read().strip()
+    except OSError:
+        return ""
+
+
+def type_cover_attached(marker: str = "Surface Type Cover") -> bool:
     """True when a Surface Type Cover is physically connected.
 
-    Fail-safe: if the by-id directory is unavailable we assume attached so we
+    On this Surface the input event nodes, ``/dev/input/by-id`` symlinks and
+    the USB device in sysfs all *persist* when the cover is detached (udev
+    leaves stale entries and Hyprland keeps a cached ``hyprctl devices``
+    entry), so none of those are a reliable signal. The one attribute that
+    does flip is the Type Cover's ``physical_location/dock`` (``yes`` when the
+    cover is attached, ``no`` when detached), which we read from sysfs.
+
+    Fail-safe: if we cannot determine the state we assume attached, so we
     never pop up the keyboard on a false positive.
     """
-    if not os.path.isdir(BY_ID):
+    if not os.path.isdir(USB_BASE):
         return True
     try:
-        entries = os.listdir(BY_ID)
+        for dev in os.listdir(USB_BASE):
+            product = _sysfs_read(USB_BASE, dev, "product")
+            if marker.lower() not in product.lower():
+                continue
+            dock = _sysfs_read(USB_BASE, dev, "physical_location", "dock")
+            if dock.strip().lower() == "yes":
+                return True
+            if dock.strip().lower() == "no":
+                return False
+            return True  # unreadable -> assume attached
     except OSError:
         return True
-    return any(marker.lower() in entry.lower() for entry in entries)
+    return False
 
 
 def _recover_wayland_env() -> None:
@@ -96,7 +121,7 @@ def _recover_wayland_env() -> None:
 
 class OskDaemon:
     def __init__(self, osk_cmd: Optional[str] = None,
-                 marker: str = "Surface_Type_Cover", poll: float = 2.0,
+                 marker: str = "Type Cover", poll: float = 2.0,
                  log_path: Optional[str] = None,
                  args: Optional[List[str]] = None) -> None:
         self.osk_cmd = osk_cmd or find_osk()
