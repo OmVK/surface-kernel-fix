@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 from typing import List
 
@@ -63,6 +64,36 @@ class PackageManager:
             self.install(["iptsd", "iio-sensor-proxy"])
         elif self.distro == Distro.DEBIAN:
             self.install(["iptsd", "iio-sensor-proxy"])
+
+    def install_osk(self) -> None:
+        """Install an on-screen keyboard suitable for tablet mode.
+
+        ``wvkbd`` is the preferred Wayland OSK (``wvkbd-deskintl`` gives a full
+        keyboard with Ctrl/Alt/Super on the main rows). On Arch it lives in the
+        AUR, so we fall back to an AUR helper when the repo package is missing.
+        """
+        candidates = {
+            Distro.ARCH: ["wvkbd"],
+            Distro.FEDORA: ["wvkbd"],
+            Distro.DEBIAN: ["wvkbd"],
+        }.get(self.distro, ["wvkbd"])
+        try:
+            self.install(candidates)
+        except NotImplementedError:
+            pass
+        if not (shutil.which("wvkbd") or shutil.which("wvkbd-deskintl")):
+            if self.distro == Distro.ARCH:
+                for helper in ("yay", "paru"):
+                    if shutil.which(helper):
+                        subprocess.run([helper, "-S", "--noconfirm", "wvkbd"],
+                                       check=False)
+                        break
+                else:
+                    print("-> wvkbd not found. On Arch it is in the AUR; install "
+                          "it with: yay -S wvkbd  (then rebuild for deskintl).")
+            else:
+                print(f"-> Could not install an OSK for {self.distro}. "
+                      "Please install 'wvkbd' manually.")
 
     # --- repo wiring --------------------------------------------------------
     def _setup_arch(self) -> None:

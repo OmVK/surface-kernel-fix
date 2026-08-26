@@ -13,6 +13,7 @@ from .kernel import setup_kernel
 from .rotate import RotationDaemon
 from .sensor import SysfsOrientation, ensure_input_stack
 from .backends import get_backend
+from .osk import OskDaemon, find_osk, type_cover_attached
 
 
 SYSTEMD_UNIT = """\
@@ -30,6 +31,23 @@ RestartSec=2
 WantedBy=graphical-session.target
 """
 
+SYSTEMD_OSK_UNIT = """\
+[Unit]
+Description=Surface on-screen keyboard (auto-show when Type Cover detached)
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart={bin} osk run
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=graphical-session.target
+"""
+
 
 def _write_user_service(bin_path: str) -> None:
     unit_dir = os.path.expanduser("~/.config/systemd/user")
@@ -41,6 +59,18 @@ def _write_user_service(bin_path: str) -> None:
     subprocess.run(["systemctl", "--user", "enable", "--now",
                     "surface-fix.service"], check=False)
     print(f"[setup] installed + enabled user service {unit_path}")
+
+
+def _write_osk_service(bin_path: str) -> None:
+    unit_dir = os.path.expanduser("~/.config/systemd/user")
+    os.makedirs(unit_dir, exist_ok=True)
+    unit_path = os.path.join(unit_dir, "surface-osk.service")
+    with open(unit_path, "w", encoding="utf-8") as fh:
+        fh.write(SYSTEMD_OSK_UNIT.format(bin=bin_path))
+    subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
+    subprocess.run(["systemctl", "--user", "enable", "--now",
+                    "surface-osk.service"], check=False)
+    print(f"[osk] installed + enabled user service {unit_path}")
 
 
 def cmd_setup(args: argparse.Namespace) -> int:
@@ -91,7 +121,33 @@ def cmd_status(args: argparse.Namespace) -> int:
         print(f"transform:  {backend.current_transform()}")
         if hasattr(backend, "touch_devices"):
             print(f"touch devs: {backend.touch_devices()}")
+    print(f"osk:        {find_osk() or 'none (install wvkbd)'}")
+    print(f"type cover: {'attached' if type_cover_attached() else 'detached -> OSK active'}")
     return 0
+
+
+def cmd_osk(args: argparse.Namespace) -> int:
+    from .distro import PackageManager
+    if args.osk_command == "run":
+        daemon = OskDaemon()
+        try:
+            daemon.run()
+        except KeyboardInterrupt:
+            print("\n[osk] stopped.")
+        return 0
+    if args.osk_command == "status":
+        print(f"osk binary: {find_osk() or 'NONE (install wvkbd)'}")
+        print(f"type cover: {'attached' if type_cover_attached() else 'detached -> OSK active'}")
+        return 0
+    if args.osk_command == "enable":
+        env = detect_environment()
+        print(f"[osk] installing on-screen keyboard for {env.distro.value}...")
+        PackageManager(env.distro).install_osk()
+        bin_path = os.path.abspath(sys.argv[0])
+        _write_osk_service(bin_path)
+        print("[osk] enabled. Detach the Type Cover to see the keyboard.")
+        return 0
+    return 1
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -104,6 +160,12 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("setup", help="Install Surface kernel + touch + enable rotation")
     sub.add_parser("rotate", help="Run the auto-rotation daemon in the foreground")
     sub.add_parser("status", help="Show detected environment and current state")
+
+    osk_p = sub.add_parser("osk", help="On-screen keyboard for tablet mode")
+    osk_sub = osk_p.add_subparsers(dest="osk_command", required=True)
+    osk_sub.add_parser("run", help="Run the OSK daemon in the foreground (Ctrl-C to stop)")
+    osk_sub.add_parser("status", help="Show OSK availability + Type Cover state")
+    osk_sub.add_parser("enable", help="Install OSK + enable auto-show service")
     return p
 
 
@@ -116,6 +178,8 @@ def main(argv: List[str] | None = None) -> int:
         return cmd_rotate(args)
     if args.command == "status":
         return cmd_status(args)
+    if args.command == "osk":
+        return cmd_osk(args)
     parser.print_help()
     return 1
 
