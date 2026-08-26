@@ -13,7 +13,7 @@ from .kernel import setup_kernel
 from .rotate import RotationDaemon
 from .sensor import SysfsOrientation, ensure_input_stack
 from .backends import get_backend
-from .osk import OskDaemon, find_osk, type_cover_attached
+from .osk import OskDaemon, find_osk, type_cover_attached, osk_toggle
 
 
 SYSTEMD_UNIT = """\
@@ -154,6 +154,10 @@ def cmd_osk(args: argparse.Namespace) -> int:
         _write_osk_service(bin_path)
         print("[osk] enabled. Detach the Type Cover to see the keyboard.")
         return 0
+    if args.osk_command == "toggle":
+        result = osk_toggle()
+        print(f"[osk] {result}")
+        return 0
     return 1
 
 
@@ -173,6 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     osk_sub.add_parser("run", help="Run the OSK daemon in the foreground (Ctrl-C to stop)")
     osk_sub.add_parser("status", help="Show OSK availability + Type Cover state")
     osk_sub.add_parser("enable", help="Install OSK + enable auto-show service")
+    osk_sub.add_parser("toggle", help="Manually show/hide the OSK (fallback)")
     return p
 
 

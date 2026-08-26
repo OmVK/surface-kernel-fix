@@ -1,22 +1,28 @@
 """On-screen keyboard auto-show for tablet mode (Type Cover detached).
 
-Detection uses the kernel ``/dev/input/by-id`` node, which disappears on a
-real disconnect even when the compositor keeps a cached device entry (this is
-exactly what broke the naive ``hyprctl devices`` check on Hyprland). The OSK
-itself is launched as a regular Wayland client (``wvkbd`` is preferred because
-``squeekboard`` requires a GNOME/Phosh session and silently exits elsewhere).
+Detection: this Surface does not expose a ``SW_TABLET_MODE`` switch and the
+Type Cover USB device / input nodes can linger as stale entries after a
+detach, so we treat the cover as attached only when BOTH the Type Cover USB
+device (``/sys/bus/usb/devices/1-7``, matched by product) AND a Type Cover
+input device (matched by name under ``/sys/class/input``) are present. On a
+real detach the kernel removes one or both (``ACTION=remove`` uevents), which
+flips detection to detached and shows the OSK. The OSK itself is ``wvkbd``
+(preferred on Wayland; ``squeekboard`` needs a GNOME/Phosh session).
 """
 
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
+import threading
 import time
 from typing import List, Optional
 
 BY_ID = "/dev/input/by-id"
 USB_BASE = "/sys/bus/usb/devices"
+INPUT_BASE = "/sys/class/input"
 LOG_PATH = "/tmp/surface-osk.log"
 
 # Preferred OSK binaries (Surface/tablet-friendly on Wayland first).
@@ -71,32 +77,39 @@ def _sysfs_read(*parts: str) -> str:
         return ""
 
 
-def type_cover_attached(marker: str = "Surface Type Cover") -> bool:
+def _find_type_cover_usb(marker: str = "Surface Type Cover") -> Optional[str]:
+    """Return the sysfs path of the Type Cover USB device, or None if absent."""
+    if not os.path.isdir(USB_BASE):
+        return None
+    for dev in os.listdir(USB_BASE):
+        if marker.lower() in _sysfs_read(USB_BASE, dev, "product").lower():
+            return os.path.join(USB_BASE, dev)
+    return None
+
+
+def type_cover_attached(marker: str = "Type Cover") -> bool:
     """True when a Surface Type Cover is physically connected.
 
-    On this Surface the input event nodes, ``/dev/input/by-id`` symlinks and
-    the USB device in sysfs all *persist* when the cover is detached (udev
-    leaves stale entries and Hyprland keeps a cached ``hyprctl devices``
-    entry), so none of those are a reliable signal. The one attribute that
-    does flip is the Type Cover's ``physical_location/dock`` (``yes`` when the
-    cover is attached, ``no`` when detached), which we read from sysfs.
+    On this Surface the kernel does not expose a ``SW_TABLET_MODE`` switch and
+    the Type Cover USB device / input nodes can *linger* as stale entries after
+    a detach. The reliable signal is the reverse: on a real detach the kernel
+    removes either the Type Cover USB device (e.g. ``/sys/bus/usb/devices/1-7``)
+    or its input devices (``ACTION=remove`` uevents on the keyboard/mouse/
+    touchpad input nodes). So the cover is treated as attached only when BOTH
+    the USB device and at least one Type Cover input device are present.
 
-    Fail-safe: if we cannot determine the state we assume attached, so we
-    never pop up the keyboard on a false positive.
+    Fail-safe: if we cannot determine the state we assume attached, so we never
+    pop up the keyboard on a false positive.
     """
-    if not os.path.isdir(USB_BASE):
+    if _find_type_cover_usb() is None:
+        return False
+    if not os.path.isdir(INPUT_BASE):
         return True
     try:
-        for dev in os.listdir(USB_BASE):
-            product = _sysfs_read(USB_BASE, dev, "product")
-            if marker.lower() not in product.lower():
-                continue
-            dock = _sysfs_read(USB_BASE, dev, "physical_location", "dock")
-            if dock.strip().lower() == "yes":
+        for inp in os.listdir(INPUT_BASE):
+            name = _sysfs_read(INPUT_BASE, inp, "device", "name")
+            if marker.lower() in name.lower():
                 return True
-            if dock.strip().lower() == "no":
-                return False
-            return True  # unreadable -> assume attached
     except OSError:
         return True
     return False
@@ -190,11 +203,115 @@ class OskDaemon:
         _recover_wayland_env()
         self._log(f"started; OSK_CMD={self.osk_cmd} poll={self.poll}s "
                   f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')}")
+
+        # Initial state. We never kill a keyboard that is already running
+        # (e.g. shown manually) so we don't yank it away at startup.
+        running = self._running()
+        state = type_cover_attached(self.marker)
+        if running:
+            state = True  # assume attached; leave the shown keyboard as-is
+        elif not state:
+            self._start()  # detached at boot -> show
+        self._log(f"initial state: attached={state}")
+
+        def apply(attached: bool) -> None:
+            nonlocal state
+            if attached != state:
+                state = attached
+                self._log(f"state change: attached={attached}")
+                if attached:
+                    self._stop()
+                else:
+                    self._start()
+
+        def monitor() -> None:
+            # Match uevents on the Type Cover input devices. `bind`/`add` =>
+            # attached (hide); `remove` => detached (show). udev events are
+            # authoritative and fire even when the device lingers as a stale
+            # entry. We match on the stable HID product id (045e:09c2) which
+            # appears in the input-device uevent devpaths regardless of which
+            # USB port the cover enumerates on.
+            dev = _find_type_cover_usb()
+            token = "045e:09c2"
+            if dev:
+                vid = _sysfs_read(dev, "idVendor")
+                pid = _sysfs_read(dev, "idProduct")
+                if vid and pid:
+                    token = f"{vid}:{pid}".lower()
+
+            def handle(action: str) -> None:
+                if action in ("add", "bind"):
+                    if state:
+                        self._stop()
+                    else:
+                        apply(True)
+                elif action == "remove":
+                    if not state:
+                        self._start()
+                    else:
+                        apply(False)
+
+            try:
+                proc = subprocess.Popen(
+                    ["udevadm", "monitor", "--udev"],
+                    stdout=subprocess.PIPE, text=True,
+                    env=dict(os.environ),
+                )
+                pat = re.compile(r"^(KERNEL|UDEV)\s*\[\S+\]\s+(\w+)\s+(\S+)")
+                for line in proc.stdout:
+                    m = pat.match(line)
+                    if not m:
+                        continue
+                    action, devpath = m.group(2), m.group(3)
+                    if token in devpath.lower():
+                        handle(action)
+            except Exception as e:  # pragma: no cover
+                self._log(f"udev monitor error: {e}")
+
+        threading.Thread(target=monitor, daemon=True).start()
+
         while True:
-            attached = type_cover_attached(self.marker)
-            self._log(f"poll: attached={attached}")
-            if attached:
-                self._stop()
-            else:
-                self._start()
+            # Polling fallback: catches a missed uevent / reflects the true
+            # device presence. The monitor above is authoritative on transitions.
+            apply(type_cover_attached(self.marker))
             time.sleep(self.poll)
+
+
+def launch_keyboard(osk_cmd: Optional[str] = None,
+                    args: Optional[List[str]] = None,
+                    log_path: Optional[str] = None) -> None:
+    """Force-launch the OSK (manual fallback when auto-detect is stuck)."""
+    cmd = osk_cmd or find_osk()
+    if not cmd:
+        return
+    _recover_wayland_env()
+    env = dict(os.environ)
+    scale = env.get("WVKBD_SCALE") or env.get("SURFACE_OSK_SCALE") \
+        or str(detect_scale())
+    env["WVKBD_SCALE"] = scale
+    a = args if args is not None else list(OSK_DEFAULT_ARGS)
+    subprocess.Popen([cmd, *a], stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
+                     env=env, start_new_session=True)
+
+
+def hide_keyboard(osk_cmd: Optional[str] = None) -> None:
+    """Force-hide the OSK (manual fallback)."""
+    cmd = osk_cmd or find_osk()
+    if not cmd:
+        return
+    subprocess.run(["pkill", "-f", cmd], check=False)
+
+
+def osk_toggle(osk_cmd: Optional[str] = None,
+               args: Optional[List[str]] = None) -> str:
+    """Toggle the OSK; returns 'shown' or 'hidden'."""
+    cmd = osk_cmd or find_osk()
+    if not cmd:
+        return "no-osk"
+    if shutil.which("pgrep") and subprocess.run(
+            ["pgrep", "-f", cmd], capture_output=True).returncode == 0:
+        hide_keyboard(cmd)
+        return "hidden"
+    launch_keyboard(cmd, args)
+    return "shown"
