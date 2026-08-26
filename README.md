@@ -32,6 +32,15 @@ pip install -e .            # or: python -m build && pip install dist/*
 sudo surface-fix setup     # installs kernel + enables rotation service
 ```
 
+If the `surface-fix` console script is not on your `PATH` (e.g. `pip` is
+unavailable), run the module directly instead:
+
+```bash
+python -m surface_fix.cli status
+python -m surface_fix.cli osk enable
+# etc.
+```
+
 `setup` detects your environment, adds the `linux-surface` repository for your
 distro, installs the kernel and input stack, makes the Surface kernel the
 default boot entry, and installs a `surface-fix.service` user unit that runs

@@ -23,7 +23,8 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart={bin} rotate
+WorkingDirectory={root}
+ExecStart={python} -m surface_fix.cli rotate
 Restart=always
 RestartSec=2
 
@@ -38,7 +39,8 @@ After=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart={bin} osk run
+WorkingDirectory={root}
+ExecStart={python} -m surface_fix.cli osk run
 Restart=always
 RestartSec=2
 StandardOutput=journal
@@ -53,8 +55,9 @@ def _write_user_service(bin_path: str) -> None:
     unit_dir = os.path.expanduser("~/.config/systemd/user")
     os.makedirs(unit_dir, exist_ok=True)
     unit_path = os.path.join(unit_dir, "surface-fix.service")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(unit_path, "w", encoding="utf-8") as fh:
-        fh.write(SYSTEMD_UNIT.format(bin=bin_path))
+        fh.write(SYSTEMD_UNIT.format(root=root, python=sys.executable))
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
     subprocess.run(["systemctl", "--user", "enable", "--now",
                     "surface-fix.service"], check=False)
@@ -65,8 +68,9 @@ def _write_osk_service(bin_path: str) -> None:
     unit_dir = os.path.expanduser("~/.config/systemd/user")
     os.makedirs(unit_dir, exist_ok=True)
     unit_path = os.path.join(unit_dir, "surface-osk.service")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     with open(unit_path, "w", encoding="utf-8") as fh:
-        fh.write(SYSTEMD_OSK_UNIT.format(bin=bin_path))
+        fh.write(SYSTEMD_OSK_UNIT.format(root=root, python=sys.executable))
     subprocess.run(["systemctl", "--user", "daemon-reload"], check=False)
     subprocess.run(["systemctl", "--user", "enable", "--now",
                     "surface-osk.service"], check=False)
