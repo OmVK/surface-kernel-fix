@@ -23,8 +23,10 @@ OSK_CANDIDATES: List[str] = [
 ]
 
 # Default launch flags for the wvkbd variants (landscape, readable size).
+# Use a font that is actually installed (DejaVu Sans is usually absent,
+# causing cairo to fall back to a tiny bitmap font that looks blurry).
 # Override with the SURFACE_OSK_ARGS environment variable (space separated).
-OSK_DEFAULT_ARGS: List[str] = ["-L", "300", "--fn", "DejaVu Sans 18"]
+OSK_DEFAULT_ARGS: List[str] = ["-L", "300", "--fn", "Noto Sans 18"]
 
 
 def find_osk() -> Optional[str]:
