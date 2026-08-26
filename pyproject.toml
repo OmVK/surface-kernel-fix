@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "surface-kernel-fix"
+version = "0.1.0"
+description = "Cross-distro helper to install the linux-surface kernel, enable IPTS touch, and auto-rotate the display (with touch alignment)."
+requires-python = ">=3.9"
+dependencies = []
+
+[project.scripts]
+surface-fix = "surface_fix.cli:main"
+
+[tool.setuptools]
+packages = ["surface_fix", "surface_fix.backends"]
