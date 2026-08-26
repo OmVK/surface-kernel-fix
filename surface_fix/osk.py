@@ -34,11 +34,10 @@ OSK_CANDIDATES: List[str] = [
 # Default launch flags for the wvkbd variants (landscape, readable size).
 # Use a font that is actually installed (DejaVu Sans is usually absent,
 # causing cairo to fall back to a tiny bitmap font that looks blurry).
-# `--auto` makes wvkbd show only when a text field is focused (real tablet
-# tap-to-type behaviour) via the input-method protocol; the daemon still
-# stops it entirely when the physical Type Cover is attached.
+# The OSK is shown on demand (status-bar toggle) and hidden when the physical
+# Type Cover is attached; it is launched visible (no --auto / --hidden).
 # Override with the SURFACE_OSK_ARGS environment variable (space separated).
-OSK_DEFAULT_ARGS: List[str] = ["-L", "300", "--fn", "Noto Sans 18", "--auto"]
+OSK_DEFAULT_ARGS: List[str] = ["-L", "300", "--fn", "Noto Sans 18"]
 
 
 def find_osk() -> Optional[str]:
@@ -218,30 +217,13 @@ class OskDaemon:
         _recover_wayland_env()
         self._log(f"started; OSK_CMD={self.osk_cmd} poll={self.poll}s "
                   f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')}")
-
-        # `_want` = the OSK process should be running (Type Cover detached).
-        # wvkbd itself (with --auto) then shows only when a text field is
-        # focused, giving real tablet tap-to-type behaviour. A `bind` uevent
-        # (physical keyboard attached) stops it; `remove` (detached) starts it.
-        self._want = False
-
-        def sync() -> None:
-            if self._want and not self._running():
-                self._start()
-            elif not self._want and self._running():
-                self._stop()
-
-        # Start enabled only if the Type Cover is not present at boot; a
-        # `bind` uevent later disables it, a `remove` enables it. `--auto`
-        # keeps it hidden until a text field is actually focused.
-        self._want = not type_cover_attached(self.marker)
-        sync()
+        self._log("visibility is driven by the status-bar toggle; the OSK is "
+                  "hidden whenever the Type Cover is attached")
 
         def monitor() -> None:
-            # React immediately to Type Cover uevents. Match both the USB port
-            # (covers the USB-device-level bind/remove that fires on
-            # attach/detach) and the stable HID product id (covers input-device
-            # uevents / re-enumeration on a different port).
+            # React immediately to Type Cover attach. Match both the USB port
+            # (USB-device-level bind/add that fires on attach) and the stable
+            # HID product id (input-device uevents / re-enumeration).
             dev = _find_type_cover_usb()
             tokens = ["1-7"]
             if dev:
@@ -250,18 +232,6 @@ class OskDaemon:
                 pid = _sysfs_read(dev, "idProduct")
                 if vid and pid:
                     tokens.append(f"{vid}:{pid}".lower())
-
-            def handle(action: str) -> None:
-                if action in ("add", "bind"):
-                    if self._want:
-                        self._want = False
-                        self._log("attached (bind): stopping OSK")
-                        sync()
-                elif action == "remove":
-                    if not self._want:
-                        self._want = True
-                        self._log("detached (remove): starting OSK")
-                        sync()
 
             try:
                 proc = subprocess.Popen(
@@ -275,23 +245,20 @@ class OskDaemon:
                     if not m:
                         continue
                     action, devpath = m.group(2), m.group(3)
-                    if action in ("add", "bind", "remove") and \
-                            any(t in devpath.lower() for t in tokens):
-                        handle(action)
+                    if action in ("add", "bind") and \
+                            any(t in devpath.lower() for t in tokens) and \
+                            self._running():
+                        self._log("attached (bind): stopping OSK")
+                        self._stop()
             except Exception as e:  # pragma: no cover
                 self._log(f"udev monitor error: {e}")
 
         threading.Thread(target=monitor, daemon=True).start()
 
+        # The status-bar toggle is the primary control. We only auto-hide on a
+        # real attach event (above), not on a continuous poll, so that clicking
+        # the icon while the cover is already attached still shows the OSK.
         while True:
-            # Fallback: if the device is truly absent, ensure the OSK is
-            # enabled. We never disable from polling (only a bind uevent does)
-            # so a lingering stale device cannot wrongly suppress the keyboard.
-            if not type_cover_attached(self.marker) and not self._want:
-                self._want = True
-                self._log("detached (poll): starting OSK")
-                sync()
-            sync()
             time.sleep(self.poll)
 
 
