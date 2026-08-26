@@ -216,56 +216,32 @@ class OskDaemon:
         self._log(f"started; OSK_CMD={self.osk_cmd} poll={self.poll}s "
                   f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')}")
 
-        # `_want` = we want the OSK shown because the Type Cover is detached.
-        # It is set True by a detach (remove uevent / truly-absent poll) and
-        # initialised True when a keyboard is already shown; it is set False
-        # ONLY by an attach (bind) uevent. Polling never clears it, so a
-        # "stuck" lingering device (present while physically detached) does
-        # not wrongly hide the keyboard.
-        self._want = False
-        self._fullscreen = detect_fullscreen()
-
         def sync() -> None:
-            desired = self._want and not self._fullscreen
+            # Show the OSK only when the Type Cover is detached AND the focused
+            # window is not fullscreen. Attached or fullscreen => hide.
+            attached = type_cover_attached(self.marker)
+            fs = detect_fullscreen()
+            desired = (not attached) and (not fs)
             if desired and not self._running():
                 self._start()
             elif not desired and self._running():
                 self._stop()
 
-        if self._running():
-            self._want = True  # already shown (detached) -> keep it
-        elif not type_cover_attached(self.marker):
-            self._want = True
-            self._start()  # detached at boot -> show
-        self._log(f"initial state: want={self._want} fullscreen={self._fullscreen}")
-        sync()
+        sync()  # initial state
 
         def monitor() -> None:
-            # Match uevents on the Type Cover input devices. `bind`/`add` =>
-            # attached (hide); `remove` => detached (show). udev events are
-            # authoritative and fire even when the device lingers as a stale
-            # entry. We match on the stable HID product id (045e:09c2) which
-            # appears in the input-device uevent devpaths regardless of which
-            # USB port the cover enumerates on.
+            # React immediately to Type Cover uevents instead of waiting for the
+            # poll. Match both the USB port (covers the USB-device-level
+            # bind/remove that fires on attach/detach) and the stable HID
+            # product id (covers input-device uevents / re-enumeration).
             dev = _find_type_cover_usb()
-            token = "045e:09c2"
+            tokens = ["1-7"]
             if dev:
+                tokens.append(os.path.basename(dev).lower())
                 vid = _sysfs_read(dev, "idVendor")
                 pid = _sysfs_read(dev, "idProduct")
                 if vid and pid:
-                    token = f"{vid}:{pid}".lower()
-
-            def handle(action: str) -> None:
-                if action in ("add", "bind"):
-                    if self._want:
-                        self._want = False
-                        self._log("attached (bind): hiding")
-                        sync()
-                elif action == "remove":
-                    if not self._want:
-                        self._want = True
-                        self._log("detached (remove): showing")
-                        sync()
+                    tokens.append(f"{vid}:{pid}".lower())
 
             try:
                 proc = subprocess.Popen(
@@ -279,25 +255,16 @@ class OskDaemon:
                     if not m:
                         continue
                     action, devpath = m.group(2), m.group(3)
-                    if token in devpath.lower():
-                        handle(action)
+                    if action in ("add", "bind", "remove") and \
+                            any(t in devpath.lower() for t in tokens):
+                        self._log(f"uevent {action} -> resync")
+                        sync()
             except Exception as e:  # pragma: no cover
                 self._log(f"udev monitor error: {e}")
 
         threading.Thread(target=monitor, daemon=True).start()
 
         while True:
-            # Polling fallback: only *shows* on a truly-absent device (covers a
-            # missed remove uevent); it never hides. Fullscreen is re-checked
-            # every poll so the keyboard hides for videos and returns after.
-            if not type_cover_attached(self.marker) and not self._want:
-                self._want = True
-                self._log("detached (poll): showing")
-                sync()
-            fs = detect_fullscreen()
-            if fs != self._fullscreen:
-                self._fullscreen = fs
-                self._log(f"fullscreen change: {fs}")
             sync()
             time.sleep(self.poll)
 
