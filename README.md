@@ -11,8 +11,9 @@ tablets/laptops) on Linux the way we validated on a Surface laptop:
     display to match its physical tilt.
  4. **Touch alignment** — rotates the touch input together with the display so
     taps land where you touch.
- 5. **On-screen keyboard** — when you detach the Type Cover, an on-screen
-    keyboard (`wvkbd`) pops up automatically so the device is usable as a tablet.
+ 5. **On-screen keyboard** — a click-to-toggle `wvkbd` keyboard, with an Omarchy
+    status-bar icon (and auto-hide when the Type Cover is reattached) so the
+    device is usable as a tablet.
 
 ## Supported targets
 
@@ -60,7 +61,9 @@ surface-fix osk run     # run the OSK daemon in the foreground (Ctrl-C to stop)
 After `setup`, **reboot** — the Surface kernel boots by default and the
 rotation daemon starts automatically. For the on-screen keyboard, run
 `surface-fix osk enable` (it installs `wvkbd` and starts a `surface-osk.service`
-user unit), then detach the Type Cover to see it appear.
+user unit). On Omarchy, also install the bar widget from `omarchy/plugins/osk-toggle/`
+and the `omarchy/bin/surface-osk-toggle.sh` helper; click the keyboard icon in the
+bar to show/hide the OSK (it auto-hides when the Type Cover is reattached).
 
 ## How it works
 
@@ -69,7 +72,7 @@ detect  -> distro, bootloader, compositor, display server
 kernel   -> distro package backend (pacman/dnf/apt) + bootloader backend
 sensor   -> reads accel_3d IIO device, maps dominant gravity axis to orientation
 rotate  -> daemon polls orientation and calls the compositor backend
-osk      -> daemon watches /dev/input/by-id for the Type Cover and launches wvkbd
+ osk      -> status-bar toggle launches wvkbd; daemon hides it on Type Cover attach
 backends-> Hyprland: hyprctl eval hl.monitor + hl.device (display + touch)
             GNOME/KDE: enable the DE's native auto-rotation (iio-sensor-proxy)
 ```
@@ -81,17 +84,21 @@ change-events, so it reacts reliably even when the device is only tilted
 
 ## On-screen keyboard (tablet mode)
 
-When the Type Cover is detached, `surface-osk.service` launches `wvkbd`
-automatically and kills it when the cover is reattached. Key details:
+The on-screen keyboard is `wvkbd` (the `deskintl` build gives a full keyboard
+with Ctrl/Alt/Super on the main rows). It is driven by a **status-bar toggle**
+rather than pure auto-show, because on this hardware the Type Cover gets
+"stuck" in the kernel device tree when unplugged: the USB device node and its
+input devices persist and no `remove` uevent fires, so detach cannot be
+detected reliably.
 
-* **Detection** watches the kernel `/dev/input/by-id/` node (e.g.
-  `usb-Microsoft_Surface_Type_Cover-event-kbd`). That node disappears on a real
-  disconnect even when the compositor (e.g. Hyprland) keeps a cached device
-  entry — which is why watching `hyprctl devices` alone fails.
-* **`wvkbd`** is used (the `deskintl` build gives a full keyboard with
-  Ctrl/Alt/Super on the main rows). `squeekboard` is intentionally *not* used
-  on wlroots compositors: it requires a GNOME/Phosh session manager and exits
-  silently elsewhere.
+* **Omarchy / Hyprland** — install the bar widget from `omarchy/plugins/osk-toggle/`
+  (`omarchy plugin enable osk.toggle`, then `omarchy bar put osk.toggle --after …`)
+  and place the helper `omarchy/bin/surface-osk-toggle.sh` on your `PATH`. A
+  keyboard icon appears in the bar; click it to show/hide the OSK.
+* **Auto-hide on attach** still works: `surface-osk.service` watches `udev` and
+  hides the OSK when the Type Cover `bind` event fires (i.e. on reattach).
+* `squeekboard` is intentionally *not* used on wlroots compositors: it requires a
+  GNOME/Phosh session manager and exits silently elsewhere.
 * Override the binary/args via the `SURFACE_OSK_CMD` and `SURFACE_OSK_ARGS`
   environment variables.
 

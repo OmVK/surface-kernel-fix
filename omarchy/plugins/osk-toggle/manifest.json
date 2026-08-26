@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "id": "osk.toggle",
+  "name": "On-screen keyboard toggle",
+  "version": "1.0.0",
+  "author": "Oz",
+  "description": "Click to show or hide the on-screen keyboard",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "OskToggle.qml" },
+  "barWidget": {
+    "displayName": "On-screen keyboard",
+    "description": "Tap to toggle the on-screen keyboard",
+    "category": "Input",
+    "allowMultiple": false
+  }
+}
