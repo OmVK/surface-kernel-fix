@@ -12,6 +12,7 @@ flips detection to detached and shows the OSK. The OSK itself is ``wvkbd``
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -75,6 +76,17 @@ def _sysfs_read(*parts: str) -> str:
             return fh.read().strip()
     except OSError:
         return ""
+
+
+def detect_fullscreen() -> bool:
+    """True when the focused window is fullscreen (so the OSK is unneeded)."""
+    try:
+        out = subprocess.run(["hyprctl", "activewindow", "-j"],
+                             capture_output=True, text=True, timeout=5).stdout
+        data = json.loads(out)
+        return bool(data.get("fullscreen")) or bool(data.get("fullscreenClient"))
+    except Exception:
+        return False
 
 
 def _find_type_cover_usb(marker: str = "Surface Type Cover") -> Optional[str]:
@@ -204,25 +216,29 @@ class OskDaemon:
         self._log(f"started; OSK_CMD={self.osk_cmd} poll={self.poll}s "
                   f"WAYLAND_DISPLAY={os.environ.get('WAYLAND_DISPLAY')}")
 
-        # Initial state. We never kill a keyboard that is already running
-        # (e.g. shown manually) so we don't yank it away at startup.
-        running = self._running()
-        state = type_cover_attached(self.marker)
-        if running:
-            state = True  # assume attached; leave the shown keyboard as-is
-        elif not state:
-            self._start()  # detached at boot -> show
-        self._log(f"initial state: attached={state}")
+        # `_want` = we want the OSK shown because the Type Cover is detached.
+        # It is set True by a detach (remove uevent / truly-absent poll) and
+        # initialised True when a keyboard is already shown; it is set False
+        # ONLY by an attach (bind) uevent. Polling never clears it, so a
+        # "stuck" lingering device (present while physically detached) does
+        # not wrongly hide the keyboard.
+        self._want = False
+        self._fullscreen = detect_fullscreen()
 
-        def apply(attached: bool) -> None:
-            nonlocal state
-            if attached != state:
-                state = attached
-                self._log(f"state change: attached={attached}")
-                if attached:
-                    self._stop()
-                else:
-                    self._start()
+        def sync() -> None:
+            desired = self._want and not self._fullscreen
+            if desired and not self._running():
+                self._start()
+            elif not desired and self._running():
+                self._stop()
+
+        if self._running():
+            self._want = True  # already shown (detached) -> keep it
+        elif not type_cover_attached(self.marker):
+            self._want = True
+            self._start()  # detached at boot -> show
+        self._log(f"initial state: want={self._want} fullscreen={self._fullscreen}")
+        sync()
 
         def monitor() -> None:
             # Match uevents on the Type Cover input devices. `bind`/`add` =>
@@ -241,15 +257,15 @@ class OskDaemon:
 
             def handle(action: str) -> None:
                 if action in ("add", "bind"):
-                    if state:
-                        self._stop()
-                    else:
-                        apply(True)
+                    if self._want:
+                        self._want = False
+                        self._log("attached (bind): hiding")
+                        sync()
                 elif action == "remove":
-                    if not state:
-                        self._start()
-                    else:
-                        apply(False)
+                    if not self._want:
+                        self._want = True
+                        self._log("detached (remove): showing")
+                        sync()
 
             try:
                 proc = subprocess.Popen(
@@ -271,9 +287,18 @@ class OskDaemon:
         threading.Thread(target=monitor, daemon=True).start()
 
         while True:
-            # Polling fallback: catches a missed uevent / reflects the true
-            # device presence. The monitor above is authoritative on transitions.
-            apply(type_cover_attached(self.marker))
+            # Polling fallback: only *shows* on a truly-absent device (covers a
+            # missed remove uevent); it never hides. Fullscreen is re-checked
+            # every poll so the keyboard hides for videos and returns after.
+            if not type_cover_attached(self.marker) and not self._want:
+                self._want = True
+                self._log("detached (poll): showing")
+                sync()
+            fs = detect_fullscreen()
+            if fs != self._fullscreen:
+                self._fullscreen = fs
+                self._log(f"fullscreen change: {fs}")
+            sync()
             time.sleep(self.poll)
 
 
