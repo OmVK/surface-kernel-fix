@@ -29,6 +29,7 @@ class RotationDaemon:
         print(f"[{self.backend.name}] manual rotation daemon started.")
         prev = None
         stable = 0
+        applied = None
         while True:
             orientation = self.source.orientation()
             if orientation is None:
@@ -43,7 +44,8 @@ class RotationDaemon:
                 prev = orientation
             if stable >= self.debounce:
                 transform = orient_to_transform(orientation)
-                if transform is not None:
+                if transform is not None and transform != applied:
                     self.backend.apply_rotation(orientation, transform)
+                    applied = transform
                 stable = 0
             time.sleep(self.poll)

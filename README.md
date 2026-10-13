@@ -105,6 +105,63 @@ detected reliably.
 > GNOME and KDE already ship their own on-screen keyboards and native
 > auto-rotation; on those compositors you usually do **not** need this module.
 
+## Fixes (changelog)
+
+### Touch drag registers as a click (Hyprland) — fixed
+
+**Symptom:** tapping works, but drag-to-scroll (YouTube, menus, lists) instead
+*clicks* the item under the finger.
+
+**Cause:** the rotation daemon re-applied the touch transform every poll tick.
+The debounce loop reset `stable` but never re-checked whether the transform was
+already active, so once the orientation settled it called
+`hyprctl eval hl.device …` **every 0.4 s forever**. Each call reconfigures the
+touch device in Hyprland, which chops an in-progress drag into isolated taps —
+i.e. clicks.
+
+**Fix** (`surface_fix/rotate.py`): remember the last applied transform and only
+call `apply_rotation` when it actually changes:
+
+```python
+applied = None
+...
+if stable >= self.debounce:
+    transform = orient_to_transform(orientation)
+    if transform is not None and transform != applied:
+        self.backend.apply_rotation(orientation, transform)
+        applied = transform
+    stable = 0
+```
+
+After the fix the daemon issues **zero** `hyprctl` calls while idle and still
+rotates instantly on orientation change. Update: `git pull` then restart
+`systemctl --user restart surface-fix.service`.
+
+### Duplicate touch input (double devices) — system-level workaround
+
+On IPTS devices the raw kernel touchscreen (`IPTS <vendor:product>
+Touchscreen`) and `iptsd`'s virtual touchscreen both appear as input devices.
+If the raw one is not ignored, libinput/Hyprland see two touchscreens and input
+misbehaves. Install a udev rule that tells libinput to ignore the raw device
+(replace `vendor:product` with yours — check `cat /proc/bus/input/devices`):
+
+```bash
+# /etc/udev/rules.d/70-ipts-raw-touchscreen-ignore.rules
+ACTION=="add", SUBSYSTEM=="input", KERNEL=="event*", \
+  ATTRS{name}=="IPTS 045E:001F Touchscreen", ENV{LIBINPUT_IGNORE_DEVICE}="1"
+```
+
+Then `sudo udevadm control --reload && sudo udevadm trigger` (or reboot).
+Verify with `hyprctl devices` (Hyprland) or `sudo libinput list-devices` —
+only the `IPTSD Virtual Touchscreen` should be listed as a touch device.
+
+### Limine backend is fail-safe
+
+`LimineBackend.set_surface_default()` no longer rewrites `limine.conf` when the
+file is unreadable/missing or contains no `linux-surface` entry — it prints a
+warning and leaves the config untouched (regenerate entries with
+`limine-mkinitcpio` instead of risking a broken bootloader config).
+
 ## Extending
 
 * New distro: add repo wiring in `surface_fix/distro.py` + a package-manager

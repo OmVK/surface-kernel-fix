@@ -62,8 +62,23 @@ class LimineBackend(BootloaderBackend):
         return "linux-surface"
 
     def set_surface_default(self) -> None:
-        path = self._surface_entry_path()
         text = _read(self.config_path)
+        if not text.strip():
+            print("[limine] WARNING: limine.conf unreadable or missing; "
+                  "skipping default_entry change (use limine-mkinitcpio / "
+                  "BOOT_ORDER in /etc/default/limine instead).")
+            return
+        path = self._surface_entry_path()
+        leaf = path.split("/")[-1]
+        has_entry = any(
+            re.match(r"\s*/\+?", line) and leaf in line
+            for line in text.splitlines()
+            if not line.strip().startswith("//")
+        )
+        if not has_entry:
+            print(f"[limine] WARNING: no '{leaf}' entry in {self.config_path}; "
+                  "leaving config unchanged (regenerate with limine-mkinitcpio).")
+            return
         new_lines = []
         replaced = False
         for line in text.splitlines():
